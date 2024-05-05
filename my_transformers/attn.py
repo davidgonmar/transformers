@@ -280,7 +280,7 @@ class GroupQueryAttention(nn.Module):
         self.W_q = nn.Linear(d_model, d_k * q_heads, bias=False)
         self.W_k = nn.Linear(d_model, d_k * kv_heads, bias=False)
         self.W_v = nn.Linear(d_model, d_v * kv_heads, bias=False)
-        self.W_o = nn.Linear(d_v * q_heads, d_model, bias=False)
+        self.W_o = nn.Linear(d_v * kv_heads, d_model, bias=False)
 
     def forward(self, Q: Tensor, K: Tensor, V: Tensor, pad_attn_mask: Tensor = None):
         """
@@ -312,15 +312,15 @@ class GroupQueryAttention(nn.Module):
 
         out = self._scaled_dot_product_attention(Q, K, V, pad_attn_mask).transpose(
             1, 2
-        )  # (n, seq_len, q_heads, d_v)
+        )  # (n, seq_len, kv_heads, d_v)
 
         assert out.size(0) == batch_size
         assert out.size(1) == len_q
-        assert out.size(2) == self.q_heads
+        assert out.size(2) == self.kv_heads
         assert out.size(3) == self.d_v
 
         # Merge the heads together to get (batch_size, len_q, q_heads * d_v)
-        out = out.reshape(batch_size, len_q, self.q_heads * self.d_v)
+        out = out.reshape(batch_size, len_q, self.kv_heads * self.d_v)
         return self.W_o(out)
 
     def _scaled_dot_product_attention(
@@ -345,7 +345,7 @@ class GroupQueryAttention(nn.Module):
                 -2, -1
             )  # allow broadcasting
         ) / self.d_k**0.5  # (batch_size, q_heads // kv_heads, kv_heads, len_q, len_k)
-
+        x = x.sum(dim=1, keepdim=False)  # (batch_size, kv_heads, len_q, len_k)
         mask = pad_attn_mask
         if self.causal:
             # Apply masking, will be broadcasted to shape (batch_size, num_heads, len_q, len_k)
@@ -374,10 +374,6 @@ class GroupQueryAttention(nn.Module):
         )  # (batch_size, num_heads // groups, groups, len_q, len_k)
         if self.save_attn_scores_to_visualize:
             self.attn_scores = x
-        r = x @ V.reshape(
-            batch_size, 1, kv_heads, len_k, self.d_v
-        )  # shape (batch_size, q_heads // kv_heads, kv_heads, len_q, d_v)
+        r = x @ V  # (batch_size, kv_heads, len_q, d_v)
 
-        return r.reshape(
-            batch_size, q_heads, len_q, self.d_v
-        )  # shape (batch_size, q_heads, len_q, d_v)
+        return r
