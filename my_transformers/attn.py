@@ -175,13 +175,11 @@ class MultiQueryAttention(nn.Module):
             .view(batch_size, len_q, self.num_heads, self.d_k)
             .transpose(1, 2)
         )  # shape (batch_size, num_heads, len_q, d_k)
-        K = (
-            self.W_k(K)
-            .view(batch_size, len_k, self.d_k)
+        K = self.W_k(K).view(
+            batch_size, len_k, self.d_k
         )  # shape (batch_size, len_k, d_k)
-        V = (
-            self.W_v(V)
-            .view(batch_size, len_v, self.d_v)
+        V = self.W_v(V).view(
+            batch_size, len_v, self.d_v
         )  # shape (batch_size, len_v, d_v)
 
         out = self._scaled_dot_product_attention(
@@ -215,7 +213,10 @@ class MultiQueryAttention(nn.Module):
         batch_size = Q.size(0)
         len_k = K.size(1)
         x = (
-            Q @ K.reshape(batch_size, 1, len_k, self.d_k).transpose(-2, -1) # allow broadcasting
+            Q
+            @ K.reshape(batch_size, 1, len_k, self.d_k).transpose(
+                -2, -1
+            )  # allow broadcasting
         ) / self.d_k**0.5  # (batch_size, num_heads, len_q, len_k)
 
         mask = pad_attn_mask
@@ -244,39 +245,42 @@ class MultiQueryAttention(nn.Module):
         x = F.softmax(x, dim=-1)  # (batch_size, num_heads, len_q, len_k)
         if self.save_attn_scores_to_visualize:
             self.attn_scores = x
-        return x @ V.reshape(batch_size, 1, len_k, self.d_v) # shape (batch_size, num_heads, len_q, d_v)
-
+        return x @ V.reshape(
+            batch_size, 1, len_k, self.d_v
+        )  # shape (batch_size, num_heads, len_q, d_v)
 
 
 class GroupQueryAttention(nn.Module):
     def __init__(
         self,
-        num_heads: int,
+        q_heads: int,
+        kv_heads: int,
         d_model: int,
         d_k: int,
         d_v: int,
-        groups: int,
         causal: bool,
         save_attn_scores_to_visualize=True,
     ):
+        # d_q and d_k are the same
         super().__init__()
-        self.num_heads = num_heads
+        self.q_heads = q_heads
         self.d_model = d_model
         self.causal = causal
         self.d_k = d_k
         self.d_v = d_v
-        self.groups = groups
+        self.kv_heads = kv_heads
+
         self.save_attn_scores_to_visualize = save_attn_scores_to_visualize
         self.attn_scores = None
 
-        assert d_model % num_heads == 0, "d_model should be divisible by num_heads"
+        assert d_model % q_heads == 0, "d_model should be divisible by q_heads"
+        assert d_model % kv_heads == 0, "d_model should be divisible by kv_heads"
+        assert q_heads % kv_heads == 0, "q_heads must be divisible by kv_heads"
 
-        self.W_q = nn.Linear(d_model, d_k * num_heads, bias=False)
-        self.W_k = nn.Linear(d_model, d_k * groups, bias=False)
-        self.W_v = nn.Linear(d_model, d_v * groups, bias=False)
-        self.W_o = nn.Linear(d_v * num_heads, d_model, bias=False)
-
-        assert num_heads % groups == 0, "num_heads must be divisible by groups"
+        self.W_q = nn.Linear(d_model, d_k * q_heads, bias=False)
+        self.W_k = nn.Linear(d_model, d_k * kv_heads, bias=False)
+        self.W_v = nn.Linear(d_model, d_v * kv_heads, bias=False)
+        self.W_o = nn.Linear(d_v * q_heads, d_model, bias=False)
 
     def forward(self, Q: Tensor, K: Tensor, V: Tensor, pad_attn_mask: Tensor = None):
         """
@@ -297,36 +301,26 @@ class GroupQueryAttention(nn.Module):
         # We transpose them so the 'inner (right-most) matrices' are of shape
         # (len_x, d_x), so shape is (batch_size, num_heads, len_x, d_x)
         Q = (
-            self.W_q(Q)
-            .view(batch_size, len_q, self.num_heads, self.d_k)
-            .transpose(1, 2)
-        )  # shape (batch_size, num_heads, len_q, d_k)
+            self.W_q(Q).view(batch_size, len_q, self.q_heads, self.d_k).transpose(1, 2)
+        )  # shape (batch_size, q_heads, len_q, d_k)
         K = (
-            self.W_k(K)
-            .view(batch_size, len_k, self.groups, self.d_k).transpose(1, 2)
-        )  # shape (batch_size, groups, len_k, d_k)
+            self.W_k(K).view(batch_size, len_k, self.kv_heads, self.d_k).transpose(1, 2)
+        )  # shape (batch_size, kv_heads, len_k, d_k)
         V = (
-            self.W_v(V)
-            .view(batch_size, len_v, self.groups, self.d_v).transpose(1, 2)
-        )  # shape (batch_size, groups, len_v, d_v)
+            self.W_v(V).view(batch_size, len_v, self.kv_heads, self.d_v).transpose(1, 2)
+        )  # shape (batch_size, kv_heads, len_v, d_v)
 
-        out = self._scaled_dot_product_attention(
-            Q, K, V, pad_attn_mask
-        )  # (batch_size, num_heads // groups, groups, len_q, d_v)
+        out = self._scaled_dot_product_attention(Q, K, V, pad_attn_mask).transpose(
+            1, 2
+        )  # (n, seq_len, q_heads, d_v)
 
-        d_v = self.d_v
-        # now, we need to multiply by the linear with input size num_heads * d_v
-        out = out.reshape(batch_size, self.num_heads, len_q, d_v).transpose(1, 2)  # shape (batch_size, len_q, num_heads, d_v)
-
-        assert out.size(2) == self.num_heads
-        assert out.size(3) == self.d_v
-        assert out.size(1) == len_q
         assert out.size(0) == batch_size
+        assert out.size(1) == len_q
+        assert out.size(2) == self.q_heads
+        assert out.size(3) == self.d_v
 
-        # We then merge the heads together to get (batch_size, len_q, num_heads * d_v)
-        # In the paper, num_heads * d_v = d_model
-        # Dont use view because memory layout is not compatible
-        out = out.reshape(batch_size, len_q, self.num_heads * self.d_v)
+        # Merge the heads together to get (batch_size, len_q, q_heads * d_v)
+        out = out.reshape(batch_size, len_q, self.q_heads * self.d_v)
         return self.W_o(out)
 
     def _scaled_dot_product_attention(
@@ -336,18 +330,21 @@ class GroupQueryAttention(nn.Module):
         This is equivalent to separately computing the attention for each head.
         n_heads must be divisible by groups
         Args:
-            Q: Query matrix with shape (batch_size, num_heads, len_q, d_k)
-            K: Key matrix with shape (batch_size, groups, len_k, d_k)
-            V: Value matrix with shape (batch_size, groups, len_v = len_k, d_v)
+            Q: Query matrix with shape (batch_size, q_heads, len_q, d_k)
+            K: Key matrix with shape (batch_size, kv_heads, len_k, d_k)
+            V: Value matrix with shape (batch_size, kv_heads, len_v = len_k, d_v)
         """
         batch_size = Q.size(0)
         len_k = K.size(2)
         len_q = Q.size(2)
         d_k = K.size(-1)
-        groups, num_heads = self.groups, self.num_heads
+        q_heads, kv_heads = self.q_heads, self.kv_heads
         x = (
-            Q.reshape(batch_size, num_heads // groups, groups, len_q, d_k) @ K.reshape(batch_size, 1, groups, len_k, self.d_k).transpose(-2, -1) # allow broadcasting
-        ) / self.d_k**0.5  # (batch_size, num_heads // groups, groups, len_q, len_k)
+            Q.reshape(batch_size, q_heads // kv_heads, kv_heads, len_q, d_k)
+            @ K.reshape(batch_size, 1, kv_heads, len_k, self.d_k).transpose(
+                -2, -1
+            )  # allow broadcasting
+        ) / self.d_k**0.5  # (batch_size, q_heads // kv_heads, kv_heads, len_q, len_k)
 
         mask = pad_attn_mask
         if self.causal:
@@ -372,7 +369,15 @@ class GroupQueryAttention(nn.Module):
                 x = x.masked_fill(
                     mask == 0, -1e9
                 )  # (batch_size, num_heads, len_q, len_k)
-        x = F.softmax(x, dim=-1)  # (batch_size, num_heads // groups, groups, len_q, len_k)
+        x = F.softmax(
+            x, dim=-1
+        )  # (batch_size, num_heads // groups, groups, len_q, len_k)
         if self.save_attn_scores_to_visualize:
             self.attn_scores = x
-        return x @ V.reshape(batch_size, 1, groups, len_k, self.d_v) # shape (batch_size, num_heads // groups, groups, len_q, d_v)
+        r = x @ V.reshape(
+            batch_size, 1, kv_heads, len_k, self.d_v
+        )  # shape (batch_size, q_heads // kv_heads, kv_heads, len_q, d_v)
+
+        return r.reshape(
+            batch_size, q_heads, len_q, self.d_v
+        )  # shape (batch_size, q_heads, len_q, d_v)
