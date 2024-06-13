@@ -91,10 +91,8 @@ class MultiHeadAttention(nn.Module):
             K: Key matrix with shape (batch_size, num_heads, len_k, d_k)
             V: Value matrix with shape (batch_size, num_heads, len_v = len_k, d_v)
         """
-        x = (
-            Q @ K.transpose(-2, -1)
-        ) / self.d_k**0.5  # (batch_size, num_heads, len_q, len_k)
-        # len_v = len_k !!!
+
+        x = torch.einsum("b h q d, b h k d -> b h q k", Q, K) / self.d_k**0.5
         mask = pad_attn_mask
         if self.causal:
             # print("before masking: ", x)
