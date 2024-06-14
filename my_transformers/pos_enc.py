@@ -100,17 +100,14 @@ class RotaryEmbeddingWithComplexs(nn.Module):
         # where i = 0, 1, ..., d/2
         # so repeat interleave thetas to go from
         # (mt1, mt2, ..., mtd/2) to (mt1, mt1, mt2, mt2, ..., mtd/2, mtd/2)
-        thetas = thetas.repeat_interleave(2)  # (d_model // 2)
-
         freqs = torch.outer(
             torch.arange(0, seq_len, dtype=torch.float), thetas
         )  # (seq_len, d_model)
 
-        freqs = torch.view_as_complex(
-            freqs.reshape(seq_len, d_model // 2, 2)  # (seq_len, d_model // 2, 2)
-        )  # (seq_len, d_model // 2)
+        # for numerical stability, we 'wrap' the frequencies
+        freqs = freqs % (2 * torch.pi)  # (seq_len, d_model)
 
-        freqs = torch.exp(freqs)  # now freqs is of the for
+        freqs = torch.polar(torch.ones_like(freqs), freqs)  # (seq_len, d_model // 2)
         # [[exp(i * m0 * theta0), exp(i * m0 * theta1), ..., exp(i * m0 * theta2), exp(i * m0 * theta3), ...]
         # [exp(i * m1 * theta0), exp(i * m1 * theta1), ..., exp(i * m1 * theta2), exp(i * m1 * theta3), ...]]
         # where m0, m1, ... are the positions and theta0, theta1, ... are the thetas
@@ -135,9 +132,9 @@ class RotaryEmbeddingWithComplexs(nn.Module):
 
         xcomp = torch.view_as_complex(x.view(batch_size, seq_len, d_model // 2, 2))
 
-        x_rot = xcomp * freqs.unsqueeze(0)[
-            :, :seq_len, :
-        ]  # handle case where seq_len < self.seq_len
+        x_rot = (
+            xcomp * freqs.unsqueeze(0)[:, :seq_len, :]
+        )  # handle case where seq_len < self.seq_len
 
         return torch.view_as_real(x_rot).reshape(batch_size, seq_len, d_model)
 
@@ -155,9 +152,6 @@ if __name__ == "__main__":
     pos_enc = RotaryEmbedding(d_model, seq_len, dropout)
     x = torch.randn(32, seq_len, d_model)
     assert pos_enc(x).shape == torch.Size([32, 100, 512])
-    pos_enc = RotaryEmbeddingWithComplexs(d_model, seq_len, dropout)
-    encoded = pos_enc(x)
+    pos_enc2 = RotaryEmbeddingWithComplexs(d_model, seq_len, dropout)
     # both rotary embeddings should be the same
-    torch.testing.assert_close(
-        encoded, pos_enc(x), rtol=1e-5, atol=1e-5, equal_nan=True
-    )  # since we are using randn some nans may appear
+    torch.testing.assert_close(pos_enc(x), pos_enc2(x), rtol=1e-5, atol=1e-5)
